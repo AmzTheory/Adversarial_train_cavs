@@ -1,0 +1,3 @@
+vehicles = 5
+collision pen = 300
+n-step = 7

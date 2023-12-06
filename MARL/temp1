@@ -1,0 +1,120 @@
+Episode 250, Average Reward -30.03 reg reward -22.87
+Collision Rate 0.80 adv_rate 0.00 cav_rate 1.00
+Average Speed and std 18.19 , 2.40 
+Episode 500, Average Reward -27.94 reg reward -21.76
+Collision Rate 0.70 adv_rate 0.00 cav_rate 1.00
+Average Speed and std 17.64 , 2.71 
+Episode 750, Average Reward -28.98 reg reward -27.53
+Collision Rate 0.80 adv_rate 0.00 cav_rate 0.00
+Average Speed and std 17.79 , 2.59 
+Episode 1000, Average Reward -36.70 reg reward -34.57
+Collision Rate 0.90 adv_rate 0.00 cav_rate 1.00
+Average Speed and std 17.75 , 2.80 
+Episode 1250, Average Reward -22.61 reg reward -20.56
+Collision Rate 0.70 adv_rate 0.00 cav_rate 0.00
+Average Speed and std 17.46 , 2.71 
+Episode 1500, Average Reward -20.86 reg reward -14.11
+Collision Rate 0.70 adv_rate 0.00 cav_rate 0.00
+Average Speed and std 17.53 , 2.82 
+Episode 1750, Average Reward -42.76 reg reward -35.40
+Collision Rate 0.90 adv_rate 0.00 cav_rate 1.00
+Average Speed and std 18.21 , 2.70 
+Episode 2000, Average Reward -33.75 reg reward -28.95
+Collision Rate 0.80 adv_rate 0.00 cav_rate 1.00
+Average Speed and std 18.31 , 2.96 
+Episode 2250, Average Reward -19.68 reg reward -15.44
+Collision Rate 0.70 adv_rate 0.00 cav_rate 0.00
+Average Speed and std 18.77 , 2.97 
+Episode 2500, Average Reward -36.40 reg reward -33.52
+Collision Rate 0.90 adv_rate 0.00 cav_rate 1.00
+Average Speed and std 18.14 , 2.78 
+Episode 2750, Average Reward -18.75 reg reward -8.73
+Collision Rate 0.70 adv_rate 0.00 cav_rate 0.00
+Average Speed and std 17.71 , 3.37 
+Episode 3000, Average Reward -11.45 reg reward -5.37
+Collision Rate 0.60 adv_rate 0.00 cav_rate 0.00
+Average Speed and std 17.77 , 3.22 
+Episode 3250, Average Reward -16.51 reg reward -9.34
+Collision Rate 0.70 adv_rate 0.00 cav_rate 0.00
+Average Speed and std 18.41 , 3.02 
+Episode 3500, Average Reward -16.54 reg reward -6.98
+Collision Rate 0.70 adv_rate 0.00 cav_rate 0.00
+Average Speed and std 18.47 , 3.06 
+Episode 3750, Average Reward -0.81 reg reward 4.34
+Collision Rate 0.60 adv_rate 0.00 cav_rate 0.00
+Average Speed and std 19.51 , 2.68 
+Episode 4000, Average Reward -12.20 reg reward -4.83
+Collision Rate 0.70 adv_rate 0.00 cav_rate 0.00
+Average Speed and std 18.88 , 2.68 
+Episode 4250, Average Reward -10.77 reg reward -4.05
+Collision Rate 0.70 adv_rate 0.00 cav_rate 0.00
+Average Speed and std 19.14 , 2.87 
+Episode 4500, Average Reward -8.27 reg reward -3.96
+Collision Rate 0.70 adv_rate 0.00 cav_rate 0.00
+Average Speed and std 19.60 , 2.64 
+Episode 4750, Average Reward -8.59 reg reward -2.40
+Collision Rate 0.70 adv_rate 0.00 cav_rate 0.00
+Average Speed and std 19.97 , 2.88 
+Episode 5000, Average Reward 8.19 reg reward 8.23
+Collision Rate 0.60 adv_rate 0.00 cav_rate 0.00
+Average Speed and std 21.99 , 2.52 
+Episode 5250, Average Reward 3.62 reg reward 1.51
+Collision Rate 0.70 adv_rate 0.00 cav_rate 1.00
+Average Speed and std 22.19 , 1.86 
+Episode 5500, Average Reward 7.01 reg reward 8.17
+Collision Rate 0.60 adv_rate 0.00 cav_rate 0.00
+Average Speed and std 20.83 , 2.66 
+Episode 5750, Average Reward 1.50 reg reward -3.71
+Collision Rate 0.70 adv_rate 0.00 cav_rate 0.00
+Average Speed and std 22.80 , 2.00 
+Episode 6000, Average Reward 22.93 reg reward 21.43
+Collision Rate 0.60 adv_rate 0.00 cav_rate 0.00
+Average Speed and std 23.80 , 1.42 
+Episode 6250, Average Reward 0.45 reg reward 2.23
+Collision Rate 0.60 adv_rate 0.00 cav_rate 0.00
+Average Speed and std 21.23 , 2.36 
+Episode 6500, Average Reward 11.70 reg reward 12.00
+Collision Rate 0.60 adv_rate 0.00 cav_rate 0.00
+Average Speed and std 22.02 , 2.12 
+Episode 6750, Average Reward 15.85 reg reward 16.34
+Collision Rate 0.70 adv_rate 0.00 cav_rate 0.00
+Average Speed and std 24.22 , 1.02 
+Episode 7000, Average Reward 15.49 reg reward 19.41
+Collision Rate 0.70 adv_rate 0.00 cav_rate 0.00
+Average Speed and std 24.80 , 1.18 
+Episode 7250, Average Reward 4.88 reg reward 6.22
+Collision Rate 0.70 adv_rate 0.00 cav_rate 0.00
+Average Speed and std 22.31 , 1.87 
+Episode 7500, Average Reward 15.08 reg reward 12.79
+Collision Rate 0.60 adv_rate 0.00 cav_rate 0.00
+Average Speed and std 22.79 , 1.28 
+Episode 7750, Average Reward 30.07 reg reward 30.25
+Collision Rate 0.60 adv_rate 0.00 cav_rate 0.00
+Average Speed and std 25.14 , 1.21 
+Episode 8000, Average Reward 8.53 reg reward 11.37
+Collision Rate 0.70 adv_rate 0.00 cav_rate 0.00
+Average Speed and std 23.59 , 1.69 
+Episode 8250, Average Reward 22.15 reg reward 22.75
+Collision Rate 0.60 adv_rate 0.00 cav_rate 0.00
+Average Speed and std 24.10 , 1.72 
+Episode 8500, Average Reward 25.64 reg reward 28.95
+Collision Rate 0.60 adv_rate 0.00 cav_rate 0.00
+Average Speed and std 25.14 , 0.90 
+Episode 8750, Average Reward 36.29 reg reward 35.24
+Collision Rate 0.50 adv_rate 0.00 cav_rate 0.00
+Average Speed and std 25.88 , 0.51 
+Episode 9000, Average Reward 12.51 reg reward 12.25
+Collision Rate 0.70 adv_rate 0.00 cav_rate 0.00
+Average Speed and std 24.81 , 0.89 
+Episode 9250, Average Reward 21.64 reg reward 20.77
+Collision Rate 0.60 adv_rate 0.00 cav_rate 0.00
+Average Speed and std 24.92 , 1.29 
+Episode 9500, Average Reward 12.58 reg reward 15.48
+Collision Rate 0.60 adv_rate 0.00 cav_rate 0.00
+Average Speed and std 24.09 , 1.32 
+Episode 9750, Average Reward 18.21 reg reward 20.53
+Collision Rate 0.70 adv_rate 0.00 cav_rate 0.00
+Average Speed and std 24.93 , 0.97 
+Episode 10000, Average Reward 8.99 reg reward 8.95
+Collision Rate 0.70 adv_rate 0.00 cav_rate 0.00
+Average Speed and std 23.35 , 1.23 

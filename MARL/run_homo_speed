@@ -1,0 +1,3 @@
+python run_ma2c.py --base-dir results/adv_speed_train/ --option train --config-dir configs/configs_5.ini 
+python run_ma2c.py --base-dir results/adv_speed_train_cl/ --option train --config-dir configs/configs_5.ini --model-dir MAA2C_5/Oct-02_12_53_20/models/ 
+

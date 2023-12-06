@@ -1,0 +1,51 @@
+Training approaches:
+    - train multi-agent AV to handle the existance of an adversary from scratch
+    - train multi-agent AV to handle an adversary via fine-tuning an existing policy
+
+degree of adversary exposure
+    - every traning episode
+    - every n episode
+
+variety of adveraries:
+    - consider single adversary model
+    - choose from set of adversaries
+
+
+
+
+curr adversarial trained models are not performing?
+
+the most likely scenario where they are failing is when an adversary speeds to hit the front vehicle, that 
+specific vehicle fails to push its speed due to a preceding slow CAV
+
+right now we are relying on the same reward fourmla with regional reward that does not distinguish between
+CAV and adversary.
+ideas to improve the current state of the work?
+
+
+1 - homo train against coll-adv
+	- not able to recover similar level of safety
+	- this can attributed to the aggressive nature of coll-adv
+2 - homo train against speed-adv
+3 - hete train against advs
+4-  hete with CL against advs
+
+
+Things to have ready by tomorrow:
+1- homo train against coll-adv with training from scratch
+2- homo train against speed-adv with CL learning
+
+tomorrow:
+1- hete train against all adversaries from scratch
+2- hete train against all adversaries with CL
+
+1- consider the variation of the above two in terms of attack ratio
+3- CL over all adversaries from scratch
+4- CL over all adversaries with CL
+
+
+question:
+how is the evaluation during training is must be preformed?
+
+
+
