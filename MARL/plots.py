@@ -56,7 +56,7 @@ def read(path):
     steps = np.load(path+"/steps.npy", allow_pickle=True)
     speeds = np.load(path+"/speed.npy", allow_pickle=True)
     
-    size = 100
+    size = 99
     return rewards[:size], rew_rewards[:size], steps[:size], speeds[:size]
 
 def get_smoothed(data, w = 5):

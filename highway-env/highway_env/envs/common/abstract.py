@@ -199,7 +199,7 @@ class AbstractEnv(gym.Env):
         ratio = self.config["ratio"]
         adv_rand = np.random.random()
         self.add_adv = True if adv_rand < ratio else False
-        self.add_adv = False 
+        
         self._reset(num_CAV=num_CAV)
         self.define_spaces()  # Second, to link the obs and actions to the vehicles once the scene is created
         # set the vehicle id for visualizing
@@ -225,6 +225,9 @@ class AbstractEnv(gym.Env):
                 probs = [float(p) for p in param.split(",")]
                 random_index = np.random.choice(len(probs), p = probs)
                 self.adv_model = self.config["adv_model"][random_index]
+            elif strat == "cl":
+                index = int(param)
+                self.adv_model = self.config["adv_model"][0]
         else:
             self.adv_model = None
         return np.asarray(obs).reshape((len(obs), -1)), np.array(available_actions)
