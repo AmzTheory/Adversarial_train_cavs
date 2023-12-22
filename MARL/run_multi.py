@@ -1,4 +1,4 @@
-from run_ma2c import train, train_hete
+from run_ma2c import train, train_hete, train_cl
 import argparse
 import random
 import multiprocessing
@@ -49,6 +49,8 @@ if __name__ == "__main__":
         fun = train
         if args.option == "train_hete":
             fun = train_hete
+        elif args.option == "train_cl":
+            fun = train_cl
         prog = multiprocessing.Process(target=fun, args=(args, rand_seed))
         progs.append(prog)
         prog.start()

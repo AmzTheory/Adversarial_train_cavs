@@ -11,12 +11,12 @@ s = np.random.randint(0,1000)
 s = 992
 env.seed = s
 env.unwrapped.seed = s
-runs = 20
+runs = 10
 
 # model_dir = "results/at_cl/Nov-03_12_22_29/"
-# model_dir = "MAA2C_5/Oct-02_12_53_20"
-model_dir = "results/adv_speed_train/Nov-27_15_55_46/"
-cav_model = loadmodel(model_dir, global_step=100, load_adv=False)
+model_dir = "MAA2C_5/Oct-02_12_53_20"
+# model_dir = "results/adv_speed_train/Nov-27_15_55_46/"
+cav_model = loadmodel(model_dir, load_adv=False)
 
 # adv_dir = "results/Oct-05_09_24_08"
 # model = loadmodel(model_dir)
@@ -28,9 +28,9 @@ cav_model = loadmodel(model_dir, global_step=100, load_adv=False)
 #     Y = model.action(X, 5, M)
 #     print(Y)
 ## modify env configurations
-adv_dir = "advs/Nov-02_14_53_46-5"
+adv_dir = "advs/Nov-02_14_53_46-5,advs/Oct-31_11_34_39-626"
 env.config["traffic_density"] = 4
-env.config["adv_model"] = load(adv_dir)
+# env.config["adv_model"] = load(adv_dir)
 env.config["duration"] = 20
 env.config["reward_type"] = "collision"
 models = []
@@ -45,13 +45,13 @@ env.config["ratio"] = 1
 
 action_mask = None
 crashed = 0
-for i in range(runs):
+for i in range(runs//2):
     obs, mask = env.reset(is_training=True)
     action_mask = mask
     env.render()
     done = False
     while not done:
-        act = cav_model.action(obs, 3 ,mask)
+        act = cav_model.action(obs, 5 ,mask)
         # act = [0] * 2
         obs, reward, done, info = env.step(act)
         mask = info["action_mask"]
@@ -62,4 +62,25 @@ for i in range(runs):
     if crash:
         print("crashed")
 
+
+adv_dir = "advs/Oct-31_11_34_39-626"
+env.adv_model = models[1]
+env.config["param"] = 1
+print("adversary has changed ")
+for i in range(runs//2):
+    obs, mask = env.reset(is_training=True)
+    action_mask = mask
+    env.render()
+    done = False
+    while not done:
+        act = cav_model.action(obs, 5 ,mask)
+        # act = [0] * 2
+        obs, reward, done, info = env.step(act)
+        mask = info["action_mask"]
+        # regional_rewards
+        avg_rew = round(sum(info["regional_rewards"])/len(info["regional_rewards"]),2)
+        env.render()
+    crash = any(vehicle.crashed for vehicle in env.controlled_vehicles)
+    if crash:
+        print("crashed")
     # print("reg_rew:" + str(avg_rew) + "   only Cavs: "+ str(env.only_cavs_crashes()))

@@ -1,0 +1,967 @@
+from __future__ import print_function, division
+from MAA2C import MAA2C
+from common.utils import agg_double_list, copy_file, init_dir
+from datetime import datetime
+
+from run_a2c import load
+
+import argparse
+import configparser
+import sys
+sys.path.append("../highway-env")
+
+import gym
+import os
+import highway_env
+import numpy as np
+import matplotlib.pyplot as plt
+import torch as th
+
+'''
+
+
+upon calling this script, if --model-dir is feed then we are going to start learning from
+existing solution
+
+V : list of adversaries  (C) 
+r : prcentage of eps that gets attacked  [0.25, 0.5, 0.75, 1]  (A)
+s : adversarial training strategy [homo, hetro, curr]  (C)
+p : params related to strategy used  (A)
+    if homo -> provide adv index to use   (ints)
+    if hetro -> provide distribution for the adversary selection.  (list)  default: evenly distributed
+    if curr -> order of training stages based on adversary index   (list)
+
+'''
+
+
+
+def parse_args():
+    """
+    Description for this experiment:
+        + hard: 7-steps, curriculum
+    """
+    default_base_dir = "./results/"
+    default_config_dir = 'configs/configs.ini'
+    parser = argparse.ArgumentParser(description=('Train or evaluate policy on RL environment '
+                                                  'using MA2C'))
+    parser.add_argument('--base-dir', type=str, required=False,
+                        default=default_base_dir, help="experiment base dir")
+    parser.add_argument('--option', type=str, required=False,
+                        default='train', help="train or evaluate")
+    parser.add_argument('--config-dir', type=str, required=False,
+                        default=default_config_dir, help="experiment config path")
+    parser.add_argument('--model-dir', type=str, required=False,
+                        default='', help="pretrained model path")
+    parser.add_argument('--evaluation-seeds', type=str, required=False,
+                        default=','.join( [str(i) for i in range(0, 600, 20) ] ),
+                        help="random seeds for evaluation, split by ," )
+    
+    parser.add_argument('--attack-ratio', type=float, required=False,
+                        default=1.0, help="set the attack ratio")
+    
+    parser.add_argument('--train-param', type=str, required=False,
+                        default="0", help="provide strategy parameters")
+    
+
+    args = parser.parse_args()
+    return args
+
+
+def train(args, seed = None):
+    base_dir = args.base_dir
+    config_dir = args.config_dir
+    config = configparser.ConfigParser()
+    config.read(config_dir)
+
+    # create an experiment folder
+    now = datetime.now().strftime("%b-%d_%H_%M_%S") + ("-"+str(seed) if seed else "")
+    output_dir = base_dir + now
+    dirs = init_dir(output_dir)
+    copy_file(dirs['configs'])
+
+    if os.path.exists(args.model_dir):
+        model_dir = args.model_dir
+    else:
+        model_dir = dirs['models']
+
+    torch_seed = seed if seed else config.getint('MODEL_CONFIG', 'torch_seed')
+    th.manual_seed(torch_seed)
+    th.backends.cudnn.benchmark = False
+    th.backends.cudnn.deterministic = True
+    os.environ['PYTHONHASHSEED'] = str(torch_seed)
+
+    # model configs
+    BATCH_SIZE = config.getint('MODEL_CONFIG', 'BATCH_SIZE')
+    MEMORY_CAPACITY = config.getint('MODEL_CONFIG', 'MEMORY_CAPACITY')
+    ROLL_OUT_N_STEPS = config.getint('MODEL_CONFIG', 'ROLL_OUT_N_STEPS')
+    reward_gamma = config.getfloat('MODEL_CONFIG', 'reward_gamma')
+    training_strategy = config.get('MODEL_CONFIG', 'training_strategy')
+    actor_hidden_size = config.getint('MODEL_CONFIG', 'actor_hidden_size')
+    critic_hidden_size = config.getint('MODEL_CONFIG', 'critic_hidden_size')
+    MAX_GRAD_NORM = config.getfloat('MODEL_CONFIG', 'MAX_GRAD_NORM')
+    ENTROPY_REG = config.getfloat('MODEL_CONFIG', 'ENTROPY_REG')
+    epsilon = config.getfloat('MODEL_CONFIG', 'epsilon')
+    alpha = config.getfloat('MODEL_CONFIG', 'alpha')
+    state_split = config.getboolean('MODEL_CONFIG', 'state_split')
+    shared_network = config.getboolean('MODEL_CONFIG', 'shared_network')
+    reward_type = config.get('MODEL_CONFIG', 'reward_type')
+
+    # train configs
+    actor_lr = config.getfloat('TRAIN_CONFIG', 'actor_lr')
+    critic_lr = config.getfloat('TRAIN_CONFIG', 'critic_lr')
+    MAX_EPISODES = config.getint('TRAIN_CONFIG', 'MAX_EPISODES')
+    EPISODES_BEFORE_TRAIN = config.getint('TRAIN_CONFIG', 'EPISODES_BEFORE_TRAIN')
+    EVAL_INTERVAL = config.getint('TRAIN_CONFIG', 'EVAL_INTERVAL')
+    EVAL_EPISODES = config.getint('TRAIN_CONFIG', 'EVAL_EPISODES')
+    reward_scale = config.getfloat('TRAIN_CONFIG', 'reward_scale')
+
+    # init env
+    env = gym.make('merge-multi-agent-v1')
+    env.config['seed'] = seed if seed else config.getint('ENV_CONFIG', 'seed')
+    env.config['simulation_frequency'] = config.getint('ENV_CONFIG', 'simulation_frequency')
+    env.config['duration'] = config.getint('ENV_CONFIG', 'duration')
+    env.config['policy_frequency'] = config.getint('ENV_CONFIG', 'policy_frequency')
+    env.config['COLLISION_REWARD'] = config.getint('ENV_CONFIG', 'COLLISION_REWARD')
+    env.config['HIGH_SPEED_REWARD'] = config.getint('ENV_CONFIG', 'HIGH_SPEED_REWARD')
+    env.config['HEADWAY_COST'] = config.getint('ENV_CONFIG', 'HEADWAY_COST')
+    env.config['HEADWAY_TIME'] = config.getfloat('ENV_CONFIG', 'HEADWAY_TIME')
+    env.config['MERGING_LANE_COST'] = config.getint('ENV_CONFIG', 'MERGING_LANE_COST')
+    env.config['traffic_density'] = config.getint('ENV_CONFIG', 'traffic_density')
+    env.config['safety_guarantee'] = config.getboolean('ENV_CONFIG', 'safety_guarantee')
+    env.config['n_step'] = config.getint('ENV_CONFIG', 'n_step')
+    traffic_density = config.getint('ENV_CONFIG', 'traffic_density')
+    env.config['action_masking'] = config.getboolean('MODEL_CONFIG', 'action_masking')
+    models = []
+    for adv_m in config.get('ENV_CONFIG', 'adv_model').split(","):
+        models.append(load(adv_m))
+    env.config["adv_model"] = models
+    
+    env.config["train_strat"] = config.get('ENV_CONFIG', 'adv_train_strategy')
+    env.config["param"] = args.train_param
+    env.config["ratio"] = args.attack_ratio
+
+    assert env.T % ROLL_OUT_N_STEPS == 0
+
+    env_eval = gym.make('merge-multi-agent-v1')
+    env_eval.config['seed'] = config.getint('ENV_CONFIG', 'seed') + 1
+    env_eval.config['simulation_frequency'] = config.getint('ENV_CONFIG', 'simulation_frequency')
+    env_eval.config['duration'] = config.getint('ENV_CONFIG', 'duration')
+    env_eval.config['policy_frequency'] = config.getint('ENV_CONFIG', 'policy_frequency')
+    env_eval.config['COLLISION_REWARD'] = config.getint('ENV_CONFIG', 'COLLISION_REWARD')
+    env_eval.config['HIGH_SPEED_REWARD'] = config.getint('ENV_CONFIG', 'HIGH_SPEED_REWARD')
+    env_eval.config['HEADWAY_COST'] = config.getint('ENV_CONFIG', 'HEADWAY_COST')
+    env_eval.config['HEADWAY_TIME'] = config.getfloat('ENV_CONFIG', 'HEADWAY_TIME')
+    env_eval.config['MERGING_LANE_COST'] = config.getint('ENV_CONFIG', 'MERGING_LANE_COST')
+    env_eval.config['traffic_density'] = config.getint('ENV_CONFIG', 'traffic_density')
+    env_eval.config['safety_guarantee'] = config.getboolean('ENV_CONFIG', 'safety_guarantee')
+    env_eval.config['n_step'] = config.getint('ENV_CONFIG', 'n_step')
+    env_eval.config['action_masking'] = config.getboolean('MODEL_CONFIG', 'action_masking')
+    env_eval.config["adv_model"] = env.config["adv_model"]
+
+    """how to preform evaluation episode in terms of strategy and ratio
+    
+        suggested approaches:
+            1 - evaluate without existance of any adversary for n eps
+            2-  evaluate with each adversary for n eps
+    """
+    env_eval.config["train_strat"] = "homo"
+    env_eval.config["param"] = 0 ## select the first index
+    env_eval.config["ratio"] = 1 
+
+    # env_eval_1 = None
+    # if env.config["train_strat"] == "hete":
+    #     env_eval_1 = gym.make('merge-multi-agent-v1')
+    #     env_eval_1.config['seed'] = config.getint('ENV_CONFIG', 'seed') + 1
+    #     env_eval_1.config['simulation_frequency'] = config.getint('ENV_CONFIG', 'simulation_frequency')
+    #     env_eval_1.config['duration'] = config.getint('ENV_CONFIG', 'duration')
+    #     env_eval_1.config['policy_frequency'] = config.getint('ENV_CONFIG', 'policy_frequency')
+    #     env_eval_1.config['COLLISION_REWARD'] = config.getint('ENV_CONFIG', 'COLLISION_REWARD')
+    #     env_eval_1.config['HIGH_SPEED_REWARD'] = config.getint('ENV_CONFIG', 'HIGH_SPEED_REWARD')
+    #     env_eval_1.config['HEADWAY_COST'] = config.getint('ENV_CONFIG', 'HEADWAY_COST')
+    #     env_eval_1.config['HEADWAY_TIME'] = config.getfloat('ENV_CONFIG', 'HEADWAY_TIME')
+    #     env_eval_1.config['MERGING_LANE_COST'] = config.getint('ENV_CONFIG', 'MERGING_LANE_COST')
+    #     env_eval_1.config['traffic_density'] = config.getint('ENV_CONFIG', 'traffic_density')
+    #     env_eval_1.config['safety_guarantee'] = config.getboolean('ENV_CONFIG', 'safety_guarantee')
+    #     env_eval_1.config['n_step'] = config.getint('ENV_CONFIG', 'n_step')
+    #     env_eval_1.config['action_masking'] = config.getboolean('MODEL_CONFIG', 'action_masking')
+    #     env_eval_1.config["adv_model"] = env.config["adv_model"]
+
+    #     env_eval_1.config["train_strat"] = "homo"
+    #     env_eval_1.config["param"] = 1 ## select the first index
+    #     env_eval_1.config["ratio"] = 1 
+        
+
+    state_dim = env.n_s
+    action_dim = env.n_a
+    test_seeds = args.evaluation_seeds
+
+    ma2c = MAA2C(env, state_dim=state_dim, action_dim=action_dim,
+                 memory_capacity=MEMORY_CAPACITY, max_steps=None,
+                 roll_out_n_steps=ROLL_OUT_N_STEPS,
+                 reward_gamma=reward_gamma, reward_scale=reward_scale, done_penalty=None,
+                 actor_hidden_size=actor_hidden_size, critic_hidden_size=critic_hidden_size,
+                 actor_lr=actor_lr, critic_lr=critic_lr,    
+                 optimizer_type="rmsprop", entropy_reg=ENTROPY_REG,
+                 max_grad_norm=MAX_GRAD_NORM, batch_size=BATCH_SIZE,
+                 episodes_before_train=EPISODES_BEFORE_TRAIN,
+                 use_cuda=False, training_strategy=training_strategy,
+                 epsilon=epsilon, alpha=alpha, traffic_density=traffic_density, test_seeds=test_seeds,
+                 state_split=state_split, shared_network=shared_network, reward_type=reward_type)
+
+    # load the model if exist
+    ma2c.load(model_dir, train_mode=True)
+    env.seed = env.config['seed']
+    env.unwrapped.seed = env.config['seed']
+    env.reset()
+    # print(env.seed)
+    episodes = []
+    eval_rewards, eval_rewards_reg, eval_steps, eval_avgspeed = [], [], [], []
+    best_eval_reward = -100
+
+    while ma2c.n_episodes < MAX_EPISODES:
+        ma2c.explore()
+        if ma2c.n_episodes >= EPISODES_BEFORE_TRAIN:
+            ma2c.train()
+        if ma2c.episode_done and ((ma2c.n_episodes + 1) % EVAL_INTERVAL == 0):
+            rewards, reg_rews ,_, steps, avg_speeds, adv_crashes, cav_crashes = ma2c.evaluation(env_eval, dirs['train_videos'], EVAL_EPISODES)
+            rewards_mu, rewards_std = agg_double_list(rewards)
+            rewards_reg_mu, rewards_reg_std = agg_double_list(reg_rews)
+            print("Episode %d, Average Reward %.2f reg reward %.2f" % (ma2c.n_episodes + 1, rewards_mu,rewards_reg_mu), end="  ")
+            success_rate = sum(np.array(steps) == 100) / len(steps)
+            avg_speeds_mu, avg_speeds_std = agg_double_list(avg_speeds)
+            adv_rate, cav_rate = np.mean(np.array(adv_crashes)), np.mean(np.array(cav_crashes))
+            print("Collision Rate %.2f adv_rate %.2f cav_rate %.2f" % (1 - success_rate, adv_rate, cav_rate), end="  ")
+            print("Average Speed and std %.2f , %.2f " % (avg_speeds_mu, avg_speeds_std))
+            episodes.append(ma2c.n_episodes + 1)
+            eval_rewards.append(rewards)
+            eval_rewards_reg.append(reg_rews)
+            eval_steps.append(steps)
+            eval_avgspeed.append(avg_speeds)
+            # save the model
+            if rewards_mu > best_eval_reward:
+                ma2c.save(dirs['models'], 100000)
+                ma2c.save(dirs['models'], ma2c.n_episodes + 1)
+                best_eval_reward = rewards_mu
+            else:
+                ma2c.save(dirs['models'], ma2c.n_episodes + 1)
+        np.save(output_dir + '/{}'.format('rewards'), np.array(eval_rewards))
+        np.save(output_dir + '/{}'.format('reg_rewards'), np.array(eval_rewards_reg))
+        np.save(output_dir + '/{}'.format('steps'), np.array(eval_steps))
+        np.save(output_dir + '/{}'.format('speed'), np.array(eval_avgspeed))
+        # save training data
+        np.save(output_dir + '/{}'.format('episode_rewards'), np.array(ma2c.episode_rewards))
+        np.save(output_dir + '/{}'.format('epoch_steps'), np.array(ma2c.epoch_steps))
+        np.save(output_dir + '/{}'.format('average_speed'), np.array(ma2c.average_speed))
+
+    # save the model
+    ma2c.save(dirs['models'], MAX_EPISODES + 2)
+
+    plt.figure()
+    plt.plot(eval_rewards)
+    plt.xlabel("Episode")
+    plt.ylabel("Average Training Reward")
+    plt.legend(["MAA2C"])
+    plt.savefig(output_dir + '/' + "maa2c_train.png")
+    # plt.show()
+
+
+def train_hete(args, seed = None):
+    base_dir = args.base_dir
+    config_dir = args.config_dir
+    config = configparser.ConfigParser()
+    config.read(config_dir)
+
+    # create an experiment folder
+    now = datetime.now().strftime("%b-%d_%H_%M_%S") + ("-"+str(seed) if seed else "")
+    output_dir = base_dir + now
+    dirs = init_dir(output_dir)
+    copy_file(dirs['configs'])
+
+    if os.path.exists(args.model_dir):
+        model_dir = args.model_dir
+    else:
+        model_dir = dirs['models']
+
+    torch_seed = seed if seed else config.getint('MODEL_CONFIG', 'torch_seed')
+    th.manual_seed(torch_seed)
+    th.backends.cudnn.benchmark = False
+    th.backends.cudnn.deterministic = True
+    os.environ['PYTHONHASHSEED'] = str(torch_seed)
+
+    # model configs
+    BATCH_SIZE = config.getint('MODEL_CONFIG', 'BATCH_SIZE')
+    MEMORY_CAPACITY = config.getint('MODEL_CONFIG', 'MEMORY_CAPACITY')
+    ROLL_OUT_N_STEPS = config.getint('MODEL_CONFIG', 'ROLL_OUT_N_STEPS')
+    reward_gamma = config.getfloat('MODEL_CONFIG', 'reward_gamma')
+    training_strategy = config.get('MODEL_CONFIG', 'training_strategy')
+    actor_hidden_size = config.getint('MODEL_CONFIG', 'actor_hidden_size')
+    critic_hidden_size = config.getint('MODEL_CONFIG', 'critic_hidden_size')
+    MAX_GRAD_NORM = config.getfloat('MODEL_CONFIG', 'MAX_GRAD_NORM')
+    ENTROPY_REG = config.getfloat('MODEL_CONFIG', 'ENTROPY_REG')
+    epsilon = config.getfloat('MODEL_CONFIG', 'epsilon')
+    alpha = config.getfloat('MODEL_CONFIG', 'alpha')
+    state_split = config.getboolean('MODEL_CONFIG', 'state_split')
+    shared_network = config.getboolean('MODEL_CONFIG', 'shared_network')
+    reward_type = config.get('MODEL_CONFIG', 'reward_type')
+
+    # train configs
+    actor_lr = config.getfloat('TRAIN_CONFIG', 'actor_lr')
+    critic_lr = config.getfloat('TRAIN_CONFIG', 'critic_lr')
+    MAX_EPISODES = config.getint('TRAIN_CONFIG', 'MAX_EPISODES')
+    EPISODES_BEFORE_TRAIN = config.getint('TRAIN_CONFIG', 'EPISODES_BEFORE_TRAIN')
+    EVAL_INTERVAL = config.getint('TRAIN_CONFIG', 'EVAL_INTERVAL')
+    EVAL_EPISODES = config.getint('TRAIN_CONFIG', 'EVAL_EPISODES')
+    reward_scale = config.getfloat('TRAIN_CONFIG', 'reward_scale')
+
+    # init env
+    env = gym.make('merge-multi-agent-v1')
+    env.config['seed'] = seed if seed else config.getint('ENV_CONFIG', 'seed')
+    env.config['simulation_frequency'] = config.getint('ENV_CONFIG', 'simulation_frequency')
+    env.config['duration'] = config.getint('ENV_CONFIG', 'duration')
+    env.config['policy_frequency'] = config.getint('ENV_CONFIG', 'policy_frequency')
+    env.config['COLLISION_REWARD'] = config.getint('ENV_CONFIG', 'COLLISION_REWARD')
+    env.config['HIGH_SPEED_REWARD'] = config.getint('ENV_CONFIG', 'HIGH_SPEED_REWARD')
+    env.config['HEADWAY_COST'] = config.getint('ENV_CONFIG', 'HEADWAY_COST')
+    env.config['HEADWAY_TIME'] = config.getfloat('ENV_CONFIG', 'HEADWAY_TIME')
+    env.config['MERGING_LANE_COST'] = config.getint('ENV_CONFIG', 'MERGING_LANE_COST')
+    env.config['traffic_density'] = config.getint('ENV_CONFIG', 'traffic_density')
+    env.config['safety_guarantee'] = config.getboolean('ENV_CONFIG', 'safety_guarantee')
+    env.config['n_step'] = config.getint('ENV_CONFIG', 'n_step')
+    traffic_density = config.getint('ENV_CONFIG', 'traffic_density')
+    env.config['action_masking'] = config.getboolean('MODEL_CONFIG', 'action_masking')
+    models = []
+    for adv_m in config.get('ENV_CONFIG', 'adv_model').split(","):
+        models.append(load(adv_m))
+    env.config["adv_model"] = models
+    
+    env.config["train_strat"] = config.get('ENV_CONFIG', 'adv_train_strategy')
+    env.config["param"] = args.train_param
+    env.config["ratio"] = args.attack_ratio
+
+    assert env.T % ROLL_OUT_N_STEPS == 0
+
+    env_eval_coll = gym.make('merge-multi-agent-v1')
+    env_eval_coll.config['seed'] = config.getint('ENV_CONFIG', 'seed') + 1
+    env_eval_coll.config['simulation_frequency'] = config.getint('ENV_CONFIG', 'simulation_frequency')
+    env_eval_coll.config['duration'] = config.getint('ENV_CONFIG', 'duration')
+    env_eval_coll.config['policy_frequency'] = config.getint('ENV_CONFIG', 'policy_frequency')
+    env_eval_coll.config['COLLISION_REWARD'] = config.getint('ENV_CONFIG', 'COLLISION_REWARD')
+    env_eval_coll.config['HIGH_SPEED_REWARD'] = config.getint('ENV_CONFIG', 'HIGH_SPEED_REWARD')
+    env_eval_coll.config['HEADWAY_COST'] = config.getint('ENV_CONFIG', 'HEADWAY_COST')
+    env_eval_coll.config['HEADWAY_TIME'] = config.getfloat('ENV_CONFIG', 'HEADWAY_TIME')
+    env_eval_coll.config['MERGING_LANE_COST'] = config.getint('ENV_CONFIG', 'MERGING_LANE_COST')
+    env_eval_coll.config['traffic_density'] = config.getint('ENV_CONFIG', 'traffic_density')
+    env_eval_coll.config['safety_guarantee'] = config.getboolean('ENV_CONFIG', 'safety_guarantee')
+    env_eval_coll.config['n_step'] = config.getint('ENV_CONFIG', 'n_step')
+    env_eval_coll.config['action_masking'] = config.getboolean('MODEL_CONFIG', 'action_masking')
+    env_eval_coll.config["adv_model"] = env.config["adv_model"]
+    env_eval_coll.config["train_strat"] = "homo"
+    env_eval_coll.config["param"] = 0 ## select the first index
+    env_eval_coll.config["ratio"] = 1 
+
+    env_eval_sp = gym.make('merge-multi-agent-v1')
+    env_eval_sp.config['seed'] = config.getint('ENV_CONFIG', 'seed') + 1
+    env_eval_sp.config['simulation_frequency'] = config.getint('ENV_CONFIG', 'simulation_frequency')
+    env_eval_sp.config['duration'] = config.getint('ENV_CONFIG', 'duration')
+    env_eval_sp.config['policy_frequency'] = config.getint('ENV_CONFIG', 'policy_frequency')
+    env_eval_sp.config['COLLISION_REWARD'] = config.getint('ENV_CONFIG', 'COLLISION_REWARD')
+    env_eval_sp.config['HIGH_SPEED_REWARD'] = config.getint('ENV_CONFIG', 'HIGH_SPEED_REWARD')
+    env_eval_sp.config['HEADWAY_COST'] = config.getint('ENV_CONFIG', 'HEADWAY_COST')
+    env_eval_sp.config['HEADWAY_TIME'] = config.getfloat('ENV_CONFIG', 'HEADWAY_TIME')
+    env_eval_sp.config['MERGING_LANE_COST'] = config.getint('ENV_CONFIG', 'MERGING_LANE_COST')
+    env_eval_sp.config['traffic_density'] = config.getint('ENV_CONFIG', 'traffic_density')
+    env_eval_sp.config['safety_guarantee'] = config.getboolean('ENV_CONFIG', 'safety_guarantee')
+    env_eval_sp.config['n_step'] = config.getint('ENV_CONFIG', 'n_step')
+    env_eval_sp.config['action_masking'] = config.getboolean('MODEL_CONFIG', 'action_masking')
+    env_eval_sp.config["adv_model"] = env.config["adv_model"]
+
+    env_eval_sp.config["train_strat"] = "homo"
+    env_eval_sp.config["param"] = 1 ## select the first index
+    env_eval_sp.config["ratio"] = 1 
+        
+
+    state_dim = env.n_s
+    action_dim = env.n_a
+    test_seeds = args.evaluation_seeds
+
+    ma2c = MAA2C(env, state_dim=state_dim, action_dim=action_dim,
+                 memory_capacity=MEMORY_CAPACITY, max_steps=None,
+                 roll_out_n_steps=ROLL_OUT_N_STEPS,
+                 reward_gamma=reward_gamma, reward_scale=reward_scale, done_penalty=None,
+                 actor_hidden_size=actor_hidden_size, critic_hidden_size=critic_hidden_size,
+                 actor_lr=actor_lr, critic_lr=critic_lr,    
+                 optimizer_type="rmsprop", entropy_reg=ENTROPY_REG,
+                 max_grad_norm=MAX_GRAD_NORM, batch_size=BATCH_SIZE,
+                 episodes_before_train=EPISODES_BEFORE_TRAIN,
+                 use_cuda=False, training_strategy=training_strategy,
+                 epsilon=epsilon, alpha=alpha, traffic_density=traffic_density, test_seeds=test_seeds,
+                 state_split=state_split, shared_network=shared_network, reward_type=reward_type)
+
+    # load the model if exist
+    ma2c.load(model_dir, train_mode=True)
+    env.seed = env.config['seed']
+    env.unwrapped.seed = env.config['seed']
+    env.reset()
+    # print(env.seed)
+    episodes = []
+    eval_rewards_coll, eval_rewards_reg_coll, eval_steps_coll, eval_avgspeed_coll = [], [], [], []
+    eval_rewards_sp, eval_rewards_reg_sp, eval_steps_sp, eval_avgspeed_sp = [], [], [], []
+    best_eval_reward = -100
+    best_eval_reward_sp = -100
+    best_eval_reward_coll = -100
+
+    while ma2c.n_episodes < MAX_EPISODES:
+        ma2c.explore()
+        if ma2c.n_episodes >= EPISODES_BEFORE_TRAIN:
+            ma2c.train()
+        if ma2c.episode_done and ((ma2c.n_episodes + 1) % EVAL_INTERVAL == 0):
+
+            ## generate collision advs evaluation results
+            rewards, reg_rews ,_, steps, avg_speeds, adv_crashes, cav_crashes = ma2c.evaluation(env_eval_coll, dirs['train_videos'], EVAL_EPISODES)
+            rewards_mu_coll, _ = agg_double_list(rewards)
+            rewards_reg_mu_coll, _ = agg_double_list(reg_rews)
+            success_rate_coll = sum(np.array(steps) == 100) / len(steps)
+            avg_speeds_mu_coll, _ = agg_double_list(avg_speeds)
+            adv_rate_coll, cav_rate_coll = np.mean(np.array(adv_crashes)), np.mean(np.array(cav_crashes))
+
+            ## store training data for coll-adv
+            episodes.append(ma2c.n_episodes + 1)
+            eval_rewards_coll.append(rewards)
+            eval_rewards_reg_coll.append(reg_rews)
+            eval_steps_coll.append(steps)
+            eval_avgspeed_coll.append(avg_speeds)
+
+
+            ## generate speed advs evaluation result
+            rewards, reg_rews ,_, steps, avg_speeds, adv_crashes, cav_crashes = ma2c.evaluation(env_eval_sp, dirs['train_videos'], EVAL_EPISODES)
+            rewards_mu_sp, _ = agg_double_list(rewards)
+            rewards_reg_mu_sp, _ = agg_double_list(reg_rews)
+            success_rate_sp = sum(np.array(steps) == 100) / len(steps)
+            avg_speeds_mu_sp, _ = agg_double_list(avg_speeds)
+            adv_rate_sp, cav_rate_sp = np.mean(np.array(adv_crashes)), np.mean(np.array(cav_crashes))
+
+            ## store training data for speed-adv
+            eval_rewards_sp.append(rewards)
+            eval_rewards_reg_sp.append(reg_rews)
+            eval_steps_sp.append(steps)
+            eval_avgspeed_sp.append(avg_speeds)
+
+
+            rewards_mu = (rewards_mu_coll + rewards_reg_mu_sp) / 2
+
+            ## print out the evaluation interval results
+            print("Episode %d, seed = %d Average Reward %.2f" % (ma2c.n_episodes + 1, env.config['seed'], rewards_mu), end="\n")
+            print("Coll-Adv:  Average Reward %.2f reg reward %.2f" % ( rewards_mu_coll,rewards_reg_mu_coll), end="  ")
+            print("Collision Rate %.2f adv_rate %.2f cav_rate %.2f Average Speed %.2f " % (1 - success_rate_coll, adv_rate_coll, cav_rate_coll, avg_speeds_mu_coll))
+            print("speed-Adv: Average Reward %.2f reg reward %.2f" % ( rewards_mu_sp,rewards_reg_mu_sp), end="  ")
+            print("Collision Rate %.2f adv_rate %.2f cav_rate %.2f Average Speed %.2f " % (1 - success_rate_sp, adv_rate_sp, cav_rate_sp, avg_speeds_mu_sp))
+
+            
+            
+            # save the model and select best according to three metrics
+            ma2c.save(dirs['models'], ma2c.n_episodes + 1)
+            if rewards_mu > best_eval_reward:
+                ma2c.save(dirs['models'], 100000)
+                best_eval_reward = rewards_mu
+            
+            if rewards_mu_coll > best_eval_reward_coll:
+                ma2c.save(dirs['models'], 100001)
+                best_eval_reward_coll = rewards_mu_coll
+
+            if rewards_reg_mu_sp > best_eval_reward_sp:
+                ma2c.save(dirs['models'], 100002)
+                best_eval_reward_sp = rewards_reg_mu_sp
+
+
+
+        # save training data
+        np.save(output_dir + '/{}'.format('rewards_coll'), np.array(eval_rewards_coll))
+        np.save(output_dir + '/{}'.format('reg_rewards_coll'), np.array(eval_rewards_reg_coll))
+        np.save(output_dir + '/{}'.format('steps_coll'), np.array(eval_steps_coll))
+        np.save(output_dir + '/{}'.format('speed_coll'), np.array(eval_avgspeed_coll))
+
+        np.save(output_dir + '/{}'.format('rewards_sp'), np.array(eval_rewards_sp))
+        np.save(output_dir + '/{}'.format('reg_rewards_sp'), np.array(eval_rewards_reg_sp))
+        np.save(output_dir + '/{}'.format('steps_sp'), np.array(eval_steps_sp))
+        np.save(output_dir + '/{}'.format('speed_sp'), np.array(eval_avgspeed_sp))
+
+
+        np.save(output_dir + '/{}'.format('episode_rewards'), np.array(ma2c.episode_rewards))
+        np.save(output_dir + '/{}'.format('epoch_steps'), np.array(ma2c.epoch_steps))
+        np.save(output_dir + '/{}'.format('average_speed'), np.array(ma2c.average_speed))
+
+    # save the model
+    ma2c.save(dirs['models'], MAX_EPISODES + 2)
+
+def train_cl(args, seed = None):
+    base_dir = args.base_dir
+    config_dir = args.config_dir
+    config = configparser.ConfigParser()
+    config.read(config_dir)
+
+    # create an experiment folder
+    now = datetime.now().strftime("%b-%d_%H_%M_%S") + ("-"+str(seed) if seed else "")
+    output_dir = base_dir + now
+    dirs = init_dir(output_dir)
+    copy_file(dirs['configs'])
+
+    if os.path.exists(args.model_dir):
+        model_dir = args.model_dir
+    else:
+        model_dir = dirs['models']
+
+    torch_seed = seed if seed else config.getint('MODEL_CONFIG', 'torch_seed')
+    th.manual_seed(torch_seed)
+    th.backends.cudnn.benchmark = False
+    th.backends.cudnn.deterministic = True
+    os.environ['PYTHONHASHSEED'] = str(torch_seed)
+
+    # model configs
+    BATCH_SIZE = config.getint('MODEL_CONFIG', 'BATCH_SIZE')
+    MEMORY_CAPACITY = config.getint('MODEL_CONFIG', 'MEMORY_CAPACITY')
+    ROLL_OUT_N_STEPS = config.getint('MODEL_CONFIG', 'ROLL_OUT_N_STEPS')
+    reward_gamma = config.getfloat('MODEL_CONFIG', 'reward_gamma')
+    training_strategy = config.get('MODEL_CONFIG', 'training_strategy')
+    actor_hidden_size = config.getint('MODEL_CONFIG', 'actor_hidden_size')
+    critic_hidden_size = config.getint('MODEL_CONFIG', 'critic_hidden_size')
+    MAX_GRAD_NORM = config.getfloat('MODEL_CONFIG', 'MAX_GRAD_NORM')
+    ENTROPY_REG = config.getfloat('MODEL_CONFIG', 'ENTROPY_REG')
+    epsilon = config.getfloat('MODEL_CONFIG', 'epsilon')
+    alpha = config.getfloat('MODEL_CONFIG', 'alpha')
+    state_split = config.getboolean('MODEL_CONFIG', 'state_split')
+    shared_network = config.getboolean('MODEL_CONFIG', 'shared_network')
+    reward_type = config.get('MODEL_CONFIG', 'reward_type')
+
+    # train configs
+    actor_lr = config.getfloat('TRAIN_CONFIG', 'actor_lr')
+    critic_lr = config.getfloat('TRAIN_CONFIG', 'critic_lr')
+    MAX_EPISODES = config.getint('TRAIN_CONFIG', 'MAX_EPISODES')
+    EPISODES_BEFORE_TRAIN = config.getint('TRAIN_CONFIG', 'EPISODES_BEFORE_TRAIN')
+    EVAL_INTERVAL = config.getint('TRAIN_CONFIG', 'EVAL_INTERVAL')
+    EVAL_EPISODES = config.getint('TRAIN_CONFIG', 'EVAL_EPISODES')
+    reward_scale = config.getfloat('TRAIN_CONFIG', 'reward_scale')
+
+    # init env
+    env = gym.make('merge-multi-agent-v1')
+    env.config['seed'] = seed if seed else config.getint('ENV_CONFIG', 'seed')
+    env.config['simulation_frequency'] = config.getint('ENV_CONFIG', 'simulation_frequency')
+    env.config['duration'] = config.getint('ENV_CONFIG', 'duration')
+    env.config['policy_frequency'] = config.getint('ENV_CONFIG', 'policy_frequency')
+    env.config['COLLISION_REWARD'] = config.getint('ENV_CONFIG', 'COLLISION_REWARD')
+    env.config['HIGH_SPEED_REWARD'] = config.getint('ENV_CONFIG', 'HIGH_SPEED_REWARD')
+    env.config['HEADWAY_COST'] = config.getint('ENV_CONFIG', 'HEADWAY_COST')
+    env.config['HEADWAY_TIME'] = config.getfloat('ENV_CONFIG', 'HEADWAY_TIME')
+    env.config['MERGING_LANE_COST'] = config.getint('ENV_CONFIG', 'MERGING_LANE_COST')
+    env.config['traffic_density'] = config.getint('ENV_CONFIG', 'traffic_density')
+    env.config['safety_guarantee'] = config.getboolean('ENV_CONFIG', 'safety_guarantee')
+    env.config['n_step'] = config.getint('ENV_CONFIG', 'n_step')
+    traffic_density = config.getint('ENV_CONFIG', 'traffic_density')
+    env.config['action_masking'] = config.getboolean('MODEL_CONFIG', 'action_masking')
+    models = []
+    for adv_m in config.get('ENV_CONFIG', 'adv_model').split(","):
+        models.append(load(adv_m))
+    env.config["adv_model"] = models
+    
+    env.config["train_strat"] = config.get('ENV_CONFIG', 'adv_train_strategy')
+    env.config["param"] = args.train_param
+    env.config["ratio"] = args.attack_ratio
+
+    assert env.T % ROLL_OUT_N_STEPS == 0
+
+    env_eval_coll = gym.make('merge-multi-agent-v1')
+    env_eval_coll.config['seed'] = config.getint('ENV_CONFIG', 'seed') + 1
+    env_eval_coll.config['simulation_frequency'] = config.getint('ENV_CONFIG', 'simulation_frequency')
+    env_eval_coll.config['duration'] = config.getint('ENV_CONFIG', 'duration')
+    env_eval_coll.config['policy_frequency'] = config.getint('ENV_CONFIG', 'policy_frequency')
+    env_eval_coll.config['COLLISION_REWARD'] = config.getint('ENV_CONFIG', 'COLLISION_REWARD')
+    env_eval_coll.config['HIGH_SPEED_REWARD'] = config.getint('ENV_CONFIG', 'HIGH_SPEED_REWARD')
+    env_eval_coll.config['HEADWAY_COST'] = config.getint('ENV_CONFIG', 'HEADWAY_COST')
+    env_eval_coll.config['HEADWAY_TIME'] = config.getfloat('ENV_CONFIG', 'HEADWAY_TIME')
+    env_eval_coll.config['MERGING_LANE_COST'] = config.getint('ENV_CONFIG', 'MERGING_LANE_COST')
+    env_eval_coll.config['traffic_density'] = config.getint('ENV_CONFIG', 'traffic_density')
+    env_eval_coll.config['safety_guarantee'] = config.getboolean('ENV_CONFIG', 'safety_guarantee')
+    env_eval_coll.config['n_step'] = config.getint('ENV_CONFIG', 'n_step')
+    env_eval_coll.config['action_masking'] = config.getboolean('MODEL_CONFIG', 'action_masking')
+    env_eval_coll.config["adv_model"] = env.config["adv_model"]
+    env_eval_coll.config["train_strat"] = "homo"
+    env_eval_coll.config["param"] = 0 ## select the first index
+    env_eval_coll.config["ratio"] = 1 
+
+    env_eval_sp = gym.make('merge-multi-agent-v1')
+    env_eval_sp.config['seed'] = config.getint('ENV_CONFIG', 'seed') + 1
+    env_eval_sp.config['simulation_frequency'] = config.getint('ENV_CONFIG', 'simulation_frequency')
+    env_eval_sp.config['duration'] = config.getint('ENV_CONFIG', 'duration')
+    env_eval_sp.config['policy_frequency'] = config.getint('ENV_CONFIG', 'policy_frequency')
+    env_eval_sp.config['COLLISION_REWARD'] = config.getint('ENV_CONFIG', 'COLLISION_REWARD')
+    env_eval_sp.config['HIGH_SPEED_REWARD'] = config.getint('ENV_CONFIG', 'HIGH_SPEED_REWARD')
+    env_eval_sp.config['HEADWAY_COST'] = config.getint('ENV_CONFIG', 'HEADWAY_COST')
+    env_eval_sp.config['HEADWAY_TIME'] = config.getfloat('ENV_CONFIG', 'HEADWAY_TIME')
+    env_eval_sp.config['MERGING_LANE_COST'] = config.getint('ENV_CONFIG', 'MERGING_LANE_COST')
+    env_eval_sp.config['traffic_density'] = config.getint('ENV_CONFIG', 'traffic_density')
+    env_eval_sp.config['safety_guarantee'] = config.getboolean('ENV_CONFIG', 'safety_guarantee')
+    env_eval_sp.config['n_step'] = config.getint('ENV_CONFIG', 'n_step')
+    env_eval_sp.config['action_masking'] = config.getboolean('MODEL_CONFIG', 'action_masking')
+    env_eval_sp.config["adv_model"] = env.config["adv_model"]
+
+    env_eval_sp.config["train_strat"] = "homo"
+    env_eval_sp.config["param"] = 1 ## select the first index
+    env_eval_sp.config["ratio"] = 1 
+        
+
+    state_dim = env.n_s
+    action_dim = env.n_a
+    test_seeds = args.evaluation_seeds
+
+    ma2c = MAA2C(env, state_dim=state_dim, action_dim=action_dim,
+                 memory_capacity=MEMORY_CAPACITY, max_steps=None,
+                 roll_out_n_steps=ROLL_OUT_N_STEPS,
+                 reward_gamma=reward_gamma, reward_scale=reward_scale, done_penalty=None,
+                 actor_hidden_size=actor_hidden_size, critic_hidden_size=critic_hidden_size,
+                 actor_lr=actor_lr, critic_lr=critic_lr,    
+                 optimizer_type="rmsprop", entropy_reg=ENTROPY_REG,
+                 max_grad_norm=MAX_GRAD_NORM, batch_size=BATCH_SIZE,
+                 episodes_before_train=EPISODES_BEFORE_TRAIN,
+                 use_cuda=False, training_strategy=training_strategy,
+                 epsilon=epsilon, alpha=alpha, traffic_density=traffic_density, test_seeds=test_seeds,
+                 state_split=state_split, shared_network=shared_network, reward_type=reward_type)
+
+    # load the model if exist
+    ma2c.load(model_dir, train_mode=True)
+    env.seed = env.config['seed']
+    env.unwrapped.seed = env.config['seed']
+    env.reset()
+    # print(env.seed)
+    episodes = []
+    eval_rewards_coll, eval_rewards_reg_coll, eval_steps_coll, eval_avgspeed_coll = [], [], [], []
+    eval_rewards_sp, eval_rewards_reg_sp, eval_steps_sp, eval_avgspeed_sp = [], [], [], []
+    best_eval_reward = -100
+    best_eval_reward_sp = -100
+    best_eval_reward_coll = -100
+
+
+    ## train against the first adversary
+    while ma2c.n_episodes < (MAX_EPISODES//2):
+        ma2c.explore()
+        if ma2c.n_episodes >= EPISODES_BEFORE_TRAIN:
+            ma2c.train()
+        if ma2c.episode_done and ((ma2c.n_episodes + 1) % EVAL_INTERVAL == 0):
+
+            ## generate collision advs evaluation results
+            rewards, reg_rews ,_, steps, avg_speeds, adv_crashes, cav_crashes = ma2c.evaluation(env_eval_coll, dirs['train_videos'], EVAL_EPISODES)
+            rewards_mu_coll, _ = agg_double_list(rewards)
+            rewards_reg_mu_coll, _ = agg_double_list(reg_rews)
+            success_rate_coll = sum(np.array(steps) == 100) / len(steps)
+            avg_speeds_mu_coll, _ = agg_double_list(avg_speeds)
+            adv_rate_coll, cav_rate_coll = np.mean(np.array(adv_crashes)), np.mean(np.array(cav_crashes))
+
+            ## store training data for coll-adv
+            episodes.append(ma2c.n_episodes + 1)
+            eval_rewards_coll.append(rewards)
+            eval_rewards_reg_coll.append(reg_rews)
+            eval_steps_coll.append(steps)
+            eval_avgspeed_coll.append(avg_speeds)
+
+
+            ## generate speed advs evaluation result
+            rewards, reg_rews ,_, steps, avg_speeds, adv_crashes, cav_crashes = ma2c.evaluation(env_eval_sp, dirs['train_videos'], EVAL_EPISODES)
+            rewards_mu_sp, _ = agg_double_list(rewards)
+            rewards_reg_mu_sp, _ = agg_double_list(reg_rews)
+            success_rate_sp = sum(np.array(steps) == 100) / len(steps)
+            avg_speeds_mu_sp, _ = agg_double_list(avg_speeds)
+            adv_rate_sp, cav_rate_sp = np.mean(np.array(adv_crashes)), np.mean(np.array(cav_crashes))
+
+            ## store training data for speed-adv
+            eval_rewards_sp.append(rewards)
+            eval_rewards_reg_sp.append(reg_rews)
+            eval_steps_sp.append(steps)
+            eval_avgspeed_sp.append(avg_speeds)
+
+
+            rewards_mu = (rewards_mu_coll + rewards_reg_mu_sp) / 2
+
+            ## print out the evaluation interval results
+            print("Episode %d, seed = %d Average Reward %.2f" % (ma2c.n_episodes + 1, env.config['seed'], rewards_mu), end="\n")
+            print("Coll-Adv:  Average Reward %.2f reg reward %.2f" % ( rewards_mu_coll,rewards_reg_mu_coll), end="  ")
+            print("Collision Rate %.2f adv_rate %.2f cav_rate %.2f Average Speed %.2f " % (1 - success_rate_coll, adv_rate_coll, cav_rate_coll, avg_speeds_mu_coll))
+            print("speed-Adv: Average Reward %.2f reg reward %.2f" % ( rewards_mu_sp,rewards_reg_mu_sp), end="  ")
+            print("Collision Rate %.2f adv_rate %.2f cav_rate %.2f Average Speed %.2f " % (1 - success_rate_sp, adv_rate_sp, cav_rate_sp, avg_speeds_mu_sp))
+
+
+            # save training data
+            np.save(output_dir + '/{}'.format('rewards_coll'), np.array(eval_rewards_coll))
+            np.save(output_dir + '/{}'.format('reg_rewards_coll'), np.array(eval_rewards_reg_coll))
+            np.save(output_dir + '/{}'.format('steps_coll'), np.array(eval_steps_coll))
+            np.save(output_dir + '/{}'.format('speed_coll'), np.array(eval_avgspeed_coll))
+
+            np.save(output_dir + '/{}'.format('rewards_sp'), np.array(eval_rewards_sp))
+            np.save(output_dir + '/{}'.format('reg_rewards_sp'), np.array(eval_rewards_reg_sp))
+            np.save(output_dir + '/{}'.format('steps_sp'), np.array(eval_steps_sp))
+            np.save(output_dir + '/{}'.format('speed_sp'), np.array(eval_avgspeed_sp))
+    
+    ## change the adversary in the enviroment
+    cur_id = int(args.train_param)
+    adv_index = 0 if cur_id + 1 >= len(models) else cur_id + 1
+    env.adv_model = env.config["adv_model"][adv_index]
+    env.config["param"] = adv_index
+    print("adversary has been changed "+str(env.adv_model))
+    ## train against the second adversary
+    while ma2c.n_episodes < (MAX_EPISODES):
+        ma2c.explore()
+        if ma2c.n_episodes >= EPISODES_BEFORE_TRAIN:
+            ma2c.train()
+        if ma2c.episode_done and ((ma2c.n_episodes + 1) % EVAL_INTERVAL == 0):
+
+            ## generate collision advs evaluation results
+            rewards, reg_rews ,_, steps, avg_speeds, adv_crashes, cav_crashes = ma2c.evaluation(env_eval_coll, dirs['train_videos'], EVAL_EPISODES)
+            rewards_mu_coll, _ = agg_double_list(rewards)
+            rewards_reg_mu_coll, _ = agg_double_list(reg_rews)
+            success_rate_coll = sum(np.array(steps) == 100) / len(steps)
+            avg_speeds_mu_coll, _ = agg_double_list(avg_speeds)
+            adv_rate_coll, cav_rate_coll = np.mean(np.array(adv_crashes)), np.mean(np.array(cav_crashes))
+
+            ## store training data for coll-adv
+            episodes.append(ma2c.n_episodes + 1)
+            eval_rewards_coll.append(rewards)
+            eval_rewards_reg_coll.append(reg_rews)
+            eval_steps_coll.append(steps)
+            eval_avgspeed_coll.append(avg_speeds)
+
+
+            ## generate speed advs evaluation result
+            rewards, reg_rews ,_, steps, avg_speeds, adv_crashes, cav_crashes = ma2c.evaluation(env_eval_sp, dirs['train_videos'], EVAL_EPISODES)
+            rewards_mu_sp, _ = agg_double_list(rewards)
+            rewards_reg_mu_sp, _ = agg_double_list(reg_rews)
+            success_rate_sp = sum(np.array(steps) == 100) / len(steps)
+            avg_speeds_mu_sp, _ = agg_double_list(avg_speeds)
+            adv_rate_sp, cav_rate_sp = np.mean(np.array(adv_crashes)), np.mean(np.array(cav_crashes))
+
+            ## store training data for speed-adv
+            eval_rewards_sp.append(rewards)
+            eval_rewards_reg_sp.append(reg_rews)
+            eval_steps_sp.append(steps)
+            eval_avgspeed_sp.append(avg_speeds)
+
+
+            rewards_mu = (rewards_mu_coll + rewards_reg_mu_sp) / 2
+
+            ## print out the evaluation interval results
+            print("Episode %d, seed = %d Average Reward %.2f" % (ma2c.n_episodes + 1, env.config['seed'], rewards_mu), end="\n")
+            print("Coll-Adv:  Average Reward %.2f reg reward %.2f" % ( rewards_mu_coll,rewards_reg_mu_coll), end="  ")
+            print("Collision Rate %.2f adv_rate %.2f cav_rate %.2f Average Speed %.2f " % (1 - success_rate_coll, adv_rate_coll, cav_rate_coll, avg_speeds_mu_coll))
+            print("speed-Adv: Average Reward %.2f reg reward %.2f" % ( rewards_mu_sp,rewards_reg_mu_sp), end="  ")
+            print("Collision Rate %.2f adv_rate %.2f cav_rate %.2f Average Speed %.2f " % (1 - success_rate_sp, adv_rate_sp, cav_rate_sp, avg_speeds_mu_sp))
+
+            
+            
+            # save the model and select best according to three metrics
+            ma2c.save(dirs['models'], ma2c.n_episodes + 1)
+            if rewards_mu > best_eval_reward:
+                ma2c.save(dirs['models'], 100000)
+                best_eval_reward = rewards_mu
+            
+            if rewards_mu_coll > best_eval_reward_coll:
+                ma2c.save(dirs['models'], 100001)
+                best_eval_reward_coll = rewards_mu_coll
+
+            if rewards_reg_mu_sp > best_eval_reward_sp:
+                ma2c.save(dirs['models'], 100002)
+                best_eval_reward_sp = rewards_reg_mu_sp
+
+
+            # save training data
+            np.save(output_dir + '/{}'.format('rewards_coll'), np.array(eval_rewards_coll))
+            np.save(output_dir + '/{}'.format('reg_rewards_coll'), np.array(eval_rewards_reg_coll))
+            np.save(output_dir + '/{}'.format('steps_coll'), np.array(eval_steps_coll))
+            np.save(output_dir + '/{}'.format('speed_coll'), np.array(eval_avgspeed_coll))
+
+            np.save(output_dir + '/{}'.format('rewards_sp'), np.array(eval_rewards_sp))
+            np.save(output_dir + '/{}'.format('reg_rewards_sp'), np.array(eval_rewards_reg_sp))
+            np.save(output_dir + '/{}'.format('steps_sp'), np.array(eval_steps_sp))
+            np.save(output_dir + '/{}'.format('speed_sp'), np.array(eval_avgspeed_sp))
+    # save the model
+    ma2c.save(dirs['models'], MAX_EPISODES + 2)
+def evaluate(args):
+    if os.path.exists(args.model_dir):
+        model_dir = args.model_dir + '/models/'
+    else:
+        raise Exception("Sorry, no pretrained models")
+    config_dir = args.model_dir + '/configs/configs.ini'
+    config = configparser.ConfigParser()
+    config.read(config_dir)
+
+    video_dir = args.model_dir + '/eval_videos'
+    eval_logs = args.model_dir + '/eval_logs'
+
+    # model configs
+    BATCH_SIZE = config.getint('MODEL_CONFIG', 'BATCH_SIZE')
+    MEMORY_CAPACITY = config.getint('MODEL_CONFIG', 'MEMORY_CAPACITY')
+    ROLL_OUT_N_STEPS = config.getint('MODEL_CONFIG', 'ROLL_OUT_N_STEPS')
+    reward_gamma = config.getfloat('MODEL_CONFIG', 'reward_gamma')
+    training_strategy = config.get('MODEL_CONFIG', 'training_strategy')
+    actor_hidden_size = config.getint('MODEL_CONFIG', 'actor_hidden_size')
+    critic_hidden_size = config.getint('MODEL_CONFIG', 'critic_hidden_size')
+    MAX_GRAD_NORM = config.getfloat('MODEL_CONFIG', 'MAX_GRAD_NORM')
+    ENTROPY_REG = config.getfloat('MODEL_CONFIG', 'ENTROPY_REG')
+    epsilon = config.getfloat('MODEL_CONFIG', 'epsilon')
+    alpha = config.getfloat('MODEL_CONFIG', 'alpha')
+    state_split = config.getboolean('MODEL_CONFIG', 'state_split')
+    shared_network = config.getboolean('MODEL_CONFIG', 'shared_network')
+    reward_type = config.get('MODEL_CONFIG', 'reward_type')
+
+    # train configs
+    actor_lr = config.getfloat('TRAIN_CONFIG', 'actor_lr')
+    critic_lr = config.getfloat('TRAIN_CONFIG', 'critic_lr')
+    EPISODES_BEFORE_TRAIN = config.getint('TRAIN_CONFIG', 'EPISODES_BEFORE_TRAIN')
+    reward_scale = config.getfloat('TRAIN_CONFIG', 'reward_scale')
+
+    # init env
+    env = gym.make('merge-multi-agent-v1')
+    env.config['simulation_frequency'] = config.getint('ENV_CONFIG', 'simulation_frequency')
+    env.config['duration'] = config.getint('ENV_CONFIG', 'duration')
+    env.config['policy_frequency'] = config.getint('ENV_CONFIG', 'policy_frequency')
+    env.config['COLLISION_REWARD'] = config.getint('ENV_CONFIG', 'COLLISION_REWARD')
+    env.config['HIGH_SPEED_REWARD'] = config.getint('ENV_CONFIG', 'HIGH_SPEED_REWARD')
+    env.config['HEADWAY_COST'] = config.getint('ENV_CONFIG', 'HEADWAY_COST')
+    env.config['HEADWAY_TIME'] = config.getfloat('ENV_CONFIG', 'HEADWAY_TIME')
+    env.config['MERGING_LANE_COST'] = config.getint('ENV_CONFIG', 'MERGING_LANE_COST')
+    env.config['traffic_density'] = config.getint('ENV_CONFIG', 'traffic_density')
+    env.config['safety_guarantee'] = config.getboolean('ENV_CONFIG', 'safety_guarantee')
+    env.config['n_step'] = config.getint('ENV_CONFIG', 'n_step')
+    traffic_density = config.getint('ENV_CONFIG', 'traffic_density')
+    env.config['action_masking'] = config.getboolean('MODEL_CONFIG', 'action_masking')
+    env.config["adv_model"] = load(config.get('ENV_CONFIG', 'adv_model'))
+    models = []
+    for adv_m in config.get('ENV_CONFIG', 'adv_model').split(","):
+        models.append(load(adv_m))
+    env.config["adv_model"] = models
+    env.config["train_strat"] = config.get('ENV_CONFIG', 'adv_train_strategy')
+    env.config["param"] = 0
+    env.config["ratio"] = 1
+
+    assert env.T % ROLL_OUT_N_STEPS == 0
+    state_dim = env.n_s
+    action_dim = env.n_a
+    test_seeds = args.evaluation_seeds
+    seeds = [int(s) for s in test_seeds.split(',')]
+
+    ma2c = MAA2C(env, state_dim=state_dim, action_dim=action_dim,
+                 memory_capacity=MEMORY_CAPACITY, max_steps=None,
+                 roll_out_n_steps=ROLL_OUT_N_STEPS,
+                 reward_gamma=reward_gamma, reward_scale=reward_scale, done_penalty=None,
+                 actor_hidden_size=actor_hidden_size, critic_hidden_size=critic_hidden_size,
+                 actor_lr=actor_lr, critic_lr=critic_lr,
+                 optimizer_type="rmsprop", entropy_reg=ENTROPY_REG,
+                 max_grad_norm=MAX_GRAD_NORM, batch_size=BATCH_SIZE,
+                 episodes_before_train=EPISODES_BEFORE_TRAIN,
+                 use_cuda=False, training_strategy=training_strategy,
+                 epsilon=epsilon, alpha=alpha, traffic_density=traffic_density, test_seeds=test_seeds,
+                 state_split=state_split, shared_network=shared_network, reward_type=reward_type)
+
+    # load the model if exist
+    ma2c.load(model_dir, train_mode=False)
+    rewards, reg_rews ,_, steps, avg_speeds, adv_crashes, cav_crashes = ma2c.evaluation(env, video_dir, len(seeds), render = False)
+    rewards_mu, rewards_std = agg_double_list(rewards)
+    rewards_reg_mu, rewards_reg_std = agg_double_list(reg_rews)
+    
+    success_rate = sum(np.array(steps) == 100) / len(steps)
+    avg_speeds_mu, avg_speeds_std = agg_double_list(avg_speeds)
+    adv_rate, cav_rate = np.mean(np.array(adv_crashes)), np.mean(np.array(cav_crashes))
+    
+    
+    # print("Average Reward %.2f reg reward %.2f" % (rewards_mu,rewards_reg_mu), end="  ")
+    # print("Collision Rate %.2f adv_rate %.2f cav_rate %.2f" % (1 - success_rate, adv_rate, cav_rate), end="  ")
+    # print("Average Speed and std %.2f , %.2f " % (avg_speeds_mu, avg_speeds_std))
+    
+    np.save(eval_logs + '/{}'.format('eval_rewards'), np.array(rewards))
+    np.save(eval_logs + '/{}'.format('eval_reg_rewards'), np.array(reg_rews))
+    np.save(eval_logs + '/{}'.format('eval_steps'), np.array(steps))
+    np.save(eval_logs + '/{}'.format('eval_avg_speeds'), np.array(avg_speeds))
+    return rewards_mu, rewards_reg_mu, (1-success_rate), avg_speeds_mu
+
+
+def loadmodel(dir, global_step=None, load_adv= True):
+    if os.path.exists(dir):
+        model_dir = dir + '/models/'
+    else:
+        raise Exception("Sorry, no pretrained models")
+
+    config_dir = dir + '/configs/configs.ini'
+    config = configparser.ConfigParser()
+    config.read(config_dir)
+
+    # model configs
+    BATCH_SIZE = config.getint('MODEL_CONFIG', 'BATCH_SIZE')
+    MEMORY_CAPACITY = config.getint('MODEL_CONFIG', 'MEMORY_CAPACITY')
+    ROLL_OUT_N_STEPS = config.getint('MODEL_CONFIG', 'ROLL_OUT_N_STEPS')
+    reward_gamma = config.getfloat('MODEL_CONFIG', 'reward_gamma')
+    training_strategy = config.get('MODEL_CONFIG', 'training_strategy')
+    actor_hidden_size = config.getint('MODEL_CONFIG', 'actor_hidden_size')
+    critic_hidden_size = config.getint('MODEL_CONFIG', 'critic_hidden_size')
+    MAX_GRAD_NORM = config.getfloat('MODEL_CONFIG', 'MAX_GRAD_NORM')
+    ENTROPY_REG = config.getfloat('MODEL_CONFIG', 'ENTROPY_REG')
+    epsilon = config.getfloat('MODEL_CONFIG', 'epsilon')
+    alpha = config.getfloat('MODEL_CONFIG', 'alpha')
+    state_split = config.getboolean('MODEL_CONFIG', 'state_split')
+    shared_network = config.getboolean('MODEL_CONFIG', 'shared_network')
+    reward_type = config.get('MODEL_CONFIG', 'reward_type')
+
+    # train configs
+    actor_lr = config.getfloat('TRAIN_CONFIG', 'actor_lr')
+    critic_lr = config.getfloat('TRAIN_CONFIG', 'critic_lr')
+    EPISODES_BEFORE_TRAIN = config.getint('TRAIN_CONFIG', 'EPISODES_BEFORE_TRAIN')
+    reward_scale = config.getfloat('TRAIN_CONFIG', 'reward_scale')
+
+    # init env
+    env = gym.make('merge-multi-agent-v1')
+    env.config['simulation_frequency'] = config.getint('ENV_CONFIG', 'simulation_frequency')
+    env.config['duration'] = config.getint('ENV_CONFIG', 'duration')
+    env.config['policy_frequency'] = config.getint('ENV_CONFIG', 'policy_frequency')
+    env.config['COLLISION_REWARD'] = config.getint('ENV_CONFIG', 'COLLISION_REWARD')
+    env.config['HIGH_SPEED_REWARD'] = config.getint('ENV_CONFIG', 'HIGH_SPEED_REWARD')
+    env.config['HEADWAY_COST'] = config.getint('ENV_CONFIG', 'HEADWAY_COST')
+    env.config['HEADWAY_TIME'] = config.getfloat('ENV_CONFIG', 'HEADWAY_TIME')
+    env.config['MERGING_LANE_COST'] = config.getint('ENV_CONFIG', 'MERGING_LANE_COST')
+    env.config['traffic_density'] = config.getint('ENV_CONFIG', 'traffic_density')
+    env.config['safety_guarantee'] = config.getboolean('ENV_CONFIG', 'safety_guarantee')
+    env.config['n_step'] = config.getint('ENV_CONFIG', 'n_step')
+    traffic_density = config.getint('ENV_CONFIG', 'traffic_density')
+    env.config['action_masking'] = config.getboolean('MODEL_CONFIG', 'action_masking')
+    models = []
+    if load_adv:
+        for adv_m in config.get('ENV_CONFIG', 'adv_model').split(","):
+            models.append(load(adv_m))
+        env.config["adv_model"] = models
+
+    assert env.T % ROLL_OUT_N_STEPS == 0
+    state_dim = env.n_s
+    action_dim = env.n_a
+    test_seeds = [1,2,3,4]
+
+    env.config["train_strat"] = "homo"
+    env.config["param"] = 0 ## select the first index
+    env.config["ratio"] = 1 
+
+    ma2c = MAA2C(env, state_dim=state_dim, action_dim=action_dim,
+                 memory_capacity=MEMORY_CAPACITY, max_steps=None,
+                 roll_out_n_steps=ROLL_OUT_N_STEPS,
+                 reward_gamma=reward_gamma, reward_scale=reward_scale, done_penalty=None,
+                 actor_hidden_size=actor_hidden_size, critic_hidden_size=critic_hidden_size,
+                 actor_lr=actor_lr, critic_lr=critic_lr,
+                 optimizer_type="rmsprop", entropy_reg=ENTROPY_REG,
+                 max_grad_norm=MAX_GRAD_NORM, batch_size=BATCH_SIZE,
+                 episodes_before_train=EPISODES_BEFORE_TRAIN,
+                 use_cuda=False, training_strategy=training_strategy,
+                 epsilon=epsilon, alpha=alpha, traffic_density=traffic_density, test_seeds=test_seeds,
+                 state_split=state_split, shared_network=shared_network, reward_type=reward_type)
+
+    # load the model if exist
+    ma2c.load(model_dir, train_mode=False, global_step=global_step)
+    return ma2c
+
+if __name__ == "__main__":
+    args = parse_args()
+    # train or eval
+    if args.option == 'train':
+        train(args)
+    else:
+        evaluate(args)

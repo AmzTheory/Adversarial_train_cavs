@@ -638,7 +638,74 @@ def train_cl(args, seed = None):
     best_eval_reward_sp = -100
     best_eval_reward_coll = -100
 
-    while ma2c.n_episodes < MAX_EPISODES:
+
+    ## train against the first adversary
+    while ma2c.n_episodes < (MAX_EPISODES//2):
+        ma2c.explore()
+        if ma2c.n_episodes >= EPISODES_BEFORE_TRAIN:
+            ma2c.train()
+        if ma2c.episode_done and ((ma2c.n_episodes + 1) % EVAL_INTERVAL == 0):
+
+            ## generate collision advs evaluation results
+            rewards, reg_rews ,_, steps, avg_speeds, adv_crashes, cav_crashes = ma2c.evaluation(env_eval_coll, dirs['train_videos'], EVAL_EPISODES)
+            rewards_mu_coll, _ = agg_double_list(rewards)
+            rewards_reg_mu_coll, _ = agg_double_list(reg_rews)
+            success_rate_coll = sum(np.array(steps) == 100) / len(steps)
+            avg_speeds_mu_coll, _ = agg_double_list(avg_speeds)
+            adv_rate_coll, cav_rate_coll = np.mean(np.array(adv_crashes)), np.mean(np.array(cav_crashes))
+
+            ## store training data for coll-adv
+            episodes.append(ma2c.n_episodes + 1)
+            eval_rewards_coll.append(rewards)
+            eval_rewards_reg_coll.append(reg_rews)
+            eval_steps_coll.append(steps)
+            eval_avgspeed_coll.append(avg_speeds)
+
+
+            ## generate speed advs evaluation result
+            rewards, reg_rews ,_, steps, avg_speeds, adv_crashes, cav_crashes = ma2c.evaluation(env_eval_sp, dirs['train_videos'], EVAL_EPISODES)
+            rewards_mu_sp, _ = agg_double_list(rewards)
+            rewards_reg_mu_sp, _ = agg_double_list(reg_rews)
+            success_rate_sp = sum(np.array(steps) == 100) / len(steps)
+            avg_speeds_mu_sp, _ = agg_double_list(avg_speeds)
+            adv_rate_sp, cav_rate_sp = np.mean(np.array(adv_crashes)), np.mean(np.array(cav_crashes))
+
+            ## store training data for speed-adv
+            eval_rewards_sp.append(rewards)
+            eval_rewards_reg_sp.append(reg_rews)
+            eval_steps_sp.append(steps)
+            eval_avgspeed_sp.append(avg_speeds)
+
+
+            rewards_mu = (rewards_mu_coll + rewards_reg_mu_sp) / 2
+
+            ## print out the evaluation interval results
+            print("Episode %d, seed = %d Average Reward %.2f" % (ma2c.n_episodes + 1, env.config['seed'], rewards_mu), end="\n")
+            print("Coll-Adv:  Average Reward %.2f reg reward %.2f" % ( rewards_mu_coll,rewards_reg_mu_coll), end="  ")
+            print("Collision Rate %.2f adv_rate %.2f cav_rate %.2f Average Speed %.2f " % (1 - success_rate_coll, adv_rate_coll, cav_rate_coll, avg_speeds_mu_coll))
+            print("speed-Adv: Average Reward %.2f reg reward %.2f" % ( rewards_mu_sp,rewards_reg_mu_sp), end="  ")
+            print("Collision Rate %.2f adv_rate %.2f cav_rate %.2f Average Speed %.2f " % (1 - success_rate_sp, adv_rate_sp, cav_rate_sp, avg_speeds_mu_sp))
+
+
+            # save training data
+            np.save(output_dir + '/{}'.format('rewards_coll'), np.array(eval_rewards_coll))
+            np.save(output_dir + '/{}'.format('reg_rewards_coll'), np.array(eval_rewards_reg_coll))
+            np.save(output_dir + '/{}'.format('steps_coll'), np.array(eval_steps_coll))
+            np.save(output_dir + '/{}'.format('speed_coll'), np.array(eval_avgspeed_coll))
+
+            np.save(output_dir + '/{}'.format('rewards_sp'), np.array(eval_rewards_sp))
+            np.save(output_dir + '/{}'.format('reg_rewards_sp'), np.array(eval_rewards_reg_sp))
+            np.save(output_dir + '/{}'.format('steps_sp'), np.array(eval_steps_sp))
+            np.save(output_dir + '/{}'.format('speed_sp'), np.array(eval_avgspeed_sp))
+    
+    ## change the adversary in the enviroment
+    cur_id = int(args.train_param)
+    adv_index = 0 if cur_id + 1 >= len(models) else cur_id + 1
+    env.adv_model = env.config["adv_model"][adv_index]
+    env.config["param"] = adv_index
+    print("adversary has been changed "+str(env.adv_model))
+    ## train against the second adversary
+    while ma2c.n_episodes < (MAX_EPISODES):
         ma2c.explore()
         if ma2c.n_episodes >= EPISODES_BEFORE_TRAIN:
             ma2c.train()
@@ -701,26 +768,19 @@ def train_cl(args, seed = None):
                 best_eval_reward_sp = rewards_reg_mu_sp
 
 
+            # save training data
+            np.save(output_dir + '/{}'.format('rewards_coll'), np.array(eval_rewards_coll))
+            np.save(output_dir + '/{}'.format('reg_rewards_coll'), np.array(eval_rewards_reg_coll))
+            np.save(output_dir + '/{}'.format('steps_coll'), np.array(eval_steps_coll))
+            np.save(output_dir + '/{}'.format('speed_coll'), np.array(eval_avgspeed_coll))
 
-        # save training data
-        np.save(output_dir + '/{}'.format('rewards_coll'), np.array(eval_rewards_coll))
-        np.save(output_dir + '/{}'.format('reg_rewards_coll'), np.array(eval_rewards_reg_coll))
-        np.save(output_dir + '/{}'.format('steps_coll'), np.array(eval_steps_coll))
-        np.save(output_dir + '/{}'.format('speed_coll'), np.array(eval_avgspeed_coll))
-
-        np.save(output_dir + '/{}'.format('rewards_sp'), np.array(eval_rewards_sp))
-        np.save(output_dir + '/{}'.format('reg_rewards_sp'), np.array(eval_rewards_reg_sp))
-        np.save(output_dir + '/{}'.format('steps_sp'), np.array(eval_steps_sp))
-        np.save(output_dir + '/{}'.format('speed_sp'), np.array(eval_avgspeed_sp))
-
-
-        np.save(output_dir + '/{}'.format('episode_rewards'), np.array(ma2c.episode_rewards))
-        np.save(output_dir + '/{}'.format('epoch_steps'), np.array(ma2c.epoch_steps))
-        np.save(output_dir + '/{}'.format('average_speed'), np.array(ma2c.average_speed))
-
+            np.save(output_dir + '/{}'.format('rewards_sp'), np.array(eval_rewards_sp))
+            np.save(output_dir + '/{}'.format('reg_rewards_sp'), np.array(eval_rewards_reg_sp))
+            np.save(output_dir + '/{}'.format('steps_sp'), np.array(eval_steps_sp))
+            np.save(output_dir + '/{}'.format('speed_sp'), np.array(eval_avgspeed_sp))
     # save the model
     ma2c.save(dirs['models'], MAX_EPISODES + 2)
-def evaluate(args):
+def evaluate(args, gl = None):
     if os.path.exists(args.model_dir):
         model_dir = args.model_dir + '/models/'
     else:
@@ -776,7 +836,7 @@ def evaluate(args):
     env.config["adv_model"] = models
     env.config["train_strat"] = config.get('ENV_CONFIG', 'adv_train_strategy')
     env.config["param"] = 0
-    env.config["ratio"] = 1
+    env.config["ratio"] = args.ratio
 
     assert env.T % ROLL_OUT_N_STEPS == 0
     state_dim = env.n_s
@@ -798,7 +858,7 @@ def evaluate(args):
                  state_split=state_split, shared_network=shared_network, reward_type=reward_type)
 
     # load the model if exist
-    ma2c.load(model_dir, train_mode=False)
+    ma2c.load(model_dir, train_mode=False, global_step = gl)
     rewards, reg_rews ,_, steps, avg_speeds, adv_crashes, cav_crashes = ma2c.evaluation(env, video_dir, len(seeds), render = False)
     rewards_mu, rewards_std = agg_double_list(rewards)
     rewards_reg_mu, rewards_reg_std = agg_double_list(reg_rews)
@@ -808,9 +868,9 @@ def evaluate(args):
     adv_rate, cav_rate = np.mean(np.array(adv_crashes)), np.mean(np.array(cav_crashes))
     
     
-    # print("Average Reward %.2f reg reward %.2f" % (rewards_mu,rewards_reg_mu), end="  ")
-    # print("Collision Rate %.2f adv_rate %.2f cav_rate %.2f" % (1 - success_rate, adv_rate, cav_rate), end="  ")
-    # print("Average Speed and std %.2f , %.2f " % (avg_speeds_mu, avg_speeds_std))
+    print("Average Reward %.2f reg reward %.2f" % (rewards_mu,rewards_reg_mu), end="  ")
+    print("Collision Rate %.2f adv_rate %.2f cav_rate %.2f" % (1 - success_rate, adv_rate, cav_rate), end="  ")
+    print("Average Speed and std %.2f , %.2f " % (avg_speeds_mu, avg_speeds_std))
     
     np.save(eval_logs + '/{}'.format('eval_rewards'), np.array(rewards))
     np.save(eval_logs + '/{}'.format('eval_reg_rewards'), np.array(reg_rews))

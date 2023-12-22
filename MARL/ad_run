@@ -1,0 +1,8 @@
+#! /bin/bash
+
+#sleep for four hrs
+sleep 14400
+
+
+# run the python script
+python run_multi.py --runs 3 --base-dir results/adv_cl_1/ --option train_cl --config-dir configs/configs_5_cl.ini --model-dir MAA2C_5/Oct-02_12_53_20/models/ --train-param 1
